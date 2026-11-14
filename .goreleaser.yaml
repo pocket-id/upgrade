@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: pocket-id-upgrade
+
+builds:
+  - binary: pocket-id-upgrade
+    env:
+      - CGO_ENABLED=0
+    # The migration versions don't fit into a 32-bit integer, which is why no earlier Pocket ID version ran on a 32-bit system
+    goos:
+      - linux
+      - darwin
+      - windows
+      - freebsd
+      - openbsd
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -w -s
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+# Pocket ID downloads and runs the binary itself, so it is released as it is and not in an archive
+archives:
+  - formats:
+      - binary
+    name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}"
+
+# Pocket ID pins these checksums and refuses to run a binary that doesn't match
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true

@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: |
+          docker run -d --name postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432 --health-cmd "pg_isready -U postgres" --health-interval 1s --health-retries 60 postgres:17
+          timeout 60 sh -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" postgres)" = healthy ]; do sleep 1; done'
+          POCKET_ID_TEST_POSTGRES_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable' go test ./...
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
