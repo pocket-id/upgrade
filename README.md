@@ -3,7 +3,7 @@
 Brings the database, the stored files and the actor state of an earlier Pocket ID into the form a new major version starts from.
 
 You normally never run this yourself.
-Pocket ID downloads the release of this program it was built against when it finds a database of an earlier major version, checks the download against the SHA-256 checksum compiled into Pocket ID, and runs it once before it starts.
+Pocket ID downloads the gzipped release of this program it was built against when it finds a database of an earlier major version, checks the download against the SHA-256 checksum compiled into Pocket ID, and decompresses and runs it once before it starts.
 
 | Release | Upgrades                     |
 | ------- | ---------------------------- |
@@ -12,22 +12,24 @@ Pocket ID downloads the release of this program it was built against when it fin
 ## Without internet access
 
 If Pocket ID can't reach GitHub, it stops with an error that names the file to download and where to put it.
-Download that file on another machine and put it next to the Pocket ID binary, keeping its name, then start Pocket ID again.
+Download that file on another machine and put it next to the Pocket ID binary, keeping its name and without decompressing it, then start Pocket ID again.
 Pocket ID checks the file against the same checksum as a download and refuses to run any other version.
 
 With Docker, mount the file next to the binary in the container:
 
 ```sh
-docker run -v ./pocket-id-upgrade_linux_amd64:/app/pocket-id-upgrade_linux_amd64:ro ...
+docker run -v ./pocket-id-upgrade_linux_amd64.gz:/app/pocket-id-upgrade_linux_amd64.gz:ro ...
 ```
 
 The file is only needed for the first start, and can be removed afterwards.
 
 ## Running it by hand
 
-Stop Pocket ID, take a backup, then run the binary in Pocket ID's working directory with the same environment variables:
+Stop Pocket ID, take a backup, then decompress the binary and run it in Pocket ID's working directory with the same environment variables:
 
 ```sh
+gunzip pocket-id-upgrade_linux_amd64.gz
+chmod +x pocket-id-upgrade_linux_amd64
 ./pocket-id-upgrade_linux_amd64
 ```
 
@@ -43,7 +45,7 @@ POCKET_ID_TEST_POSTGRES_URL='postgres://postgres:postgres@localhost:5432/postgre
 ```
 
 `internal/install` connects to the installation the way Pocket ID does, and `internal/tov3` holds everything that brings it to v3.
-`internal/tov3/migrations/` is a frozen copy of Pocket ID's golang-migrate files and never changes.
+`internal/tov3/migrations/` holds Pocket ID's golang-migrate files, which only change to bring data of v2 in line with v3.
 `internal/tov3/testdata/baseline/` is a copy of the goose baseline of v3, which the tests compare against the migrated schema.
 
 ## Adding a major version

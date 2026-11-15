@@ -23,13 +23,15 @@ builds:
       - -w -s
     mod_timestamp: "{{ .CommitTimestamp }}"
 
-# Pocket ID downloads and runs the binary itself, so it is released as it is and not in an archive
+# Pocket ID downloads, decompresses and runs the binary itself, so it is only gzipped and not put into an archive with other files
 archives:
   - formats:
-      - binary
-    name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}"
+      - gz
+    name_template: '{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}'
+    files:
+      - none*
 
-# Pocket ID pins these checksums and refuses to run a binary that doesn't match
+# Pocket ID pins the checksums of the gzipped files and refuses to run a binary that doesn't match
 checksum:
   name_template: checksums.txt
 
