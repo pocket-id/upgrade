@@ -309,15 +309,16 @@ func TestUpgradeActorStateFromKV(t *testing.T) {
 		}, appConfig)
 
 		var token signupTokenState
-		require.NoError(t, readState(t, inst, signupTokenActorType, "valid-token", &token))
+		require.NoError(t, readState(t, inst, signupTokenActorType, hashToken("valid-token"), &token))
 		assert.Equal(t, "valid-id", token.ID)
+		assert.Equal(t, "vali", token.Prefix)
 		assert.Equal(t, 5, token.UsageLimit)
 		assert.Equal(t, 2, token.UsageCount)
 		assert.Equal(t, []string{"group"}, token.UserGroupIDs)
 		assert.True(t, createdAt.Equal(token.CreatedAt))
 		assert.True(t, expiresAt.Equal(token.ExpiresAt))
 
-		err = readState(t, inst, signupTokenActorType, "expired-token", &signupTokenState{})
+		err = readState(t, inst, signupTokenActorType, hashToken("expired-token"), &signupTokenState{})
 		require.ErrorIs(t, err, actor.ErrStateNotFound)
 
 		var legacyRows int
@@ -380,5 +381,48 @@ func TestUpgradeActorStateFromState(t *testing.T) {
 		var rerun map[string]string
 		require.NoError(t, readState(t, inst, appConfigActorType, actor.SingletonActorID, &rerun))
 		assert.Equal(t, after, rerun)
+	})
+}
+
+func TestUpgradeActorStateHashesTokens(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, postgres bool) {
+		inst := newLegacyDatabase(t, postgres)
+
+		// Store the tokens the way v2 did, keyed by the token itself and with the device token in clear text
+		expiresAt := time.Now().Add(time.Hour).Truncate(time.Second)
+		err := inst.WithStateStore(t.Context(), func(store install.StateStore) error {
+			err := store.SetState(t.Context(), signupTokenActorType, "SIGNUPTOKEN12345", signupTokenState{ID: "signup-id", UsageLimit: 3, UsageCount: 1, ExpiresAt: expiresAt}, &actor.SetStateOpts{TTL: time.Hour})
+			if err != nil {
+				return err
+			}
+			return store.SetState(t.Context(), oneTimeAccessTokenActorType, "abc123", oneTimeAccessTokenState{UserID: "user-id", DeviceToken: new("device-token"), ExpiresAt: expiresAt}, &actor.SetStateOpts{TTL: time.Hour})
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, Upgrade(t.Context(), inst))
+
+		// Only the hashes are left, and the states carry over with the prefix and the hashed device token
+		var signupToken signupTokenState
+		require.NoError(t, readState(t, inst, signupTokenActorType, hashToken("SIGNUPTOKEN12345"), &signupToken))
+		assert.Equal(t, "signup-id", signupToken.ID)
+		assert.Equal(t, "SIGN", signupToken.Prefix)
+		assert.Equal(t, 1, signupToken.UsageCount)
+		assert.True(t, expiresAt.Equal(signupToken.ExpiresAt))
+		require.ErrorIs(t, readState(t, inst, signupTokenActorType, "SIGNUPTOKEN12345", &signupTokenState{}), actor.ErrStateNotFound)
+
+		var loginCode oneTimeAccessTokenState
+		require.NoError(t, readState(t, inst, oneTimeAccessTokenActorType, hashToken("abc123"), &loginCode))
+		assert.Equal(t, "user-id", loginCode.UserID)
+		assert.Equal(t, hashToken("device-token"), *loginCode.DeviceToken)
+		require.ErrorIs(t, readState(t, inst, oneTimeAccessTokenActorType, "abc123", &oneTimeAccessTokenState{}), actor.ErrStateNotFound)
+
+		// A repeated run must not hash the hashes again
+		err = inst.WithStateStore(t.Context(), func(store install.StateStore) error {
+			return upgradeActorState(t.Context(), inst.DB, store, inst.Config.EncryptionKey)
+		})
+		require.NoError(t, err)
+		var rerun oneTimeAccessTokenState
+		require.NoError(t, readState(t, inst, oneTimeAccessTokenActorType, hashToken("abc123"), &rerun))
+		assert.Equal(t, loginCode, rerun)
 	})
 }

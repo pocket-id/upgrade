@@ -26,6 +26,8 @@ type StateStore interface {
 	// GetState returns actor.ErrStateNotFound when the actor has no state
 	GetState(ctx context.Context, actorType string, actorID string, dest any) error
 	SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error
+	ListStates(ctx context.Context, actorType string, opts *actor.ListStatesOpts) (actor.StateList, error)
+	DeleteState(ctx context.Context, actorType string, actorID string) error
 }
 
 // WithStateStore calls fn with access to the actor state, which lives in Pocket ID's database unless a standalone Francis runtime is configured

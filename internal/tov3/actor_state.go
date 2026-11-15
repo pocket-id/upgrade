@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,14 +24,18 @@ import (
 )
 
 const (
-	appConfigActorType   = "AppConfig"
-	signupTokenActorType = "SignupToken"
+	appConfigActorType          = "AppConfig"
+	signupTokenActorType        = "SignupToken"
+	oneTimeAccessTokenActorType = "OneTimeAccessToken"
 
 	// The kv rows that hold the app config and the signup tokens of the versions that kept them in tables
 	legacyConfigKey       = "config_migrated"
 	legacySignupTokensKey = "signup_tokens_migrated" // #nosec G101 -- database key name, not a credential
 
 	encryptedSecretPrefix = "encrypted:"
+
+	// signupTokenPrefixLength is how many leading characters of a signup token v3 keeps in clear text so admins can tell tokens apart
+	signupTokenPrefixLength = 4
 )
 
 // The fields of v3's app config by the key earlier versions stored them under
@@ -89,9 +94,10 @@ var appConfigFields = map[string]string{
 	"emailVerificationEnabled":                   "EmailVerificationEnabled",
 }
 
-// signupTokenState is the state of v3's SignupToken actor, whose ID is the token
+// signupTokenState is the state of v3's SignupToken actor, whose ID is the SHA-256 hash of the token
 type signupTokenState struct {
 	ID           string
+	Prefix       string
 	UsageLimit   int
 	UsageCount   int
 	UserGroupIDs []string
@@ -99,12 +105,40 @@ type signupTokenState struct {
 	ExpiresAt    time.Time
 }
 
-// upgradeActorState brings the app config and the signup tokens into the actor state v3 reads
+// oneTimeAccessTokenState is the state of v3's OneTimeAccessToken actor, whose ID is the SHA-256 hash of the token
+type oneTimeAccessTokenState struct {
+	UserID string
+	// DeviceToken is the SHA-256 hash of the device token the token is bound to
+	DeviceToken *string
+	ExpiresAt   time.Time
+}
+
+// upgradeActorState brings the app config and the tokens into the actor state v3 reads
 func upgradeActorState(ctx context.Context, db *sql.DB, store install.StateStore, encryptionKey []byte) error {
 	err := upgradeAppConfig(ctx, db, store, encryptionKey)
 	if err != nil {
 		return fmt.Errorf("failed to upgrade the app config: %w", err)
 	}
+
+	// v2 keyed the token actors by the token itself, while v3 only stores hashes so the state store holds no usable token
+	err = rekeyTokens(ctx, store, signupTokenActorType, func(token string, state *signupTokenState) time.Time {
+		state.Prefix = token[:min(signupTokenPrefixLength, len(token))]
+		return state.ExpiresAt
+	})
+	if err != nil {
+		return fmt.Errorf("failed to hash the signup tokens: %w", err)
+	}
+	err = rekeyTokens(ctx, store, oneTimeAccessTokenActorType, func(_ string, state *oneTimeAccessTokenState) time.Time {
+		if state.DeviceToken != nil {
+			state.DeviceToken = new(hashToken(*state.DeviceToken))
+		}
+		return state.ExpiresAt
+	})
+	if err != nil {
+		return fmt.Errorf("failed to hash the login codes: %w", err)
+	}
+
+	// The tokens in the kv table come last, so the check for a token that has state only needs to look under its hash
 	err = upgradeSignupTokens(ctx, db, store)
 	if err != nil {
 		return fmt.Errorf("failed to upgrade the signup tokens: %w", err)
@@ -195,15 +229,16 @@ func upgradeSignupTokens(ctx context.Context, db *sql.DB, store install.StateSto
 		}
 
 		// A token that already has state was moved by an earlier version or an interrupted run, and may have been used since
-		err = store.GetState(ctx, signupTokenActorType, token.Token, &signupTokenState{})
+		err = store.GetState(ctx, signupTokenActorType, hashToken(token.Token), &signupTokenState{})
 		if err == nil {
 			continue
 		} else if !errors.Is(err, actor.ErrStateNotFound) {
 			return err
 		}
 
-		err = store.SetState(ctx, signupTokenActorType, token.Token, signupTokenState{
+		err = store.SetState(ctx, signupTokenActorType, hashToken(token.Token), signupTokenState{
 			ID:           token.ID,
+			Prefix:       token.Token[:min(signupTokenPrefixLength, len(token.Token))],
 			UsageLimit:   token.UsageLimit,
 			UsageCount:   token.UsageCount,
 			UserGroupIDs: token.UserGroupIDs,
@@ -220,6 +255,70 @@ func upgradeSignupTokens(ctx context.Context, db *sql.DB, store install.StateSto
 		slog.Info("Moved signup tokens to the actor state", slog.Int("count", moved))
 	}
 	return nil
+}
+
+// rekeyTokens moves every state of the actor type that is keyed by a token to the token's hash, which is what v3 looks it up by
+// fn turns the token and its state into the state v3 reads, and returns when that state expires
+func rekeyTokens[T any](ctx context.Context, store install.StateStore, actorType string, fn func(token string, state *T) time.Time) error {
+	// Collect every state before changing any, since a hashed ID could otherwise show up again further down the listing
+	var states []actor.StateInfo
+	var after string
+	for {
+		res, err := store.ListStates(ctx, actorType, &actor.ListStatesOpts{IncludeData: true, After: after})
+		if err != nil {
+			return fmt.Errorf("failed to list the states: %w", err)
+		}
+		states = append(states, res.States...)
+		after = res.AfterID()
+		if after == "" {
+			break
+		}
+	}
+
+	moved := 0
+	for _, st := range states {
+		// A hashed ID comes from an interrupted run, since no token is 64 hex characters long
+		if st.Data == nil || isTokenHash(st.ActorID) {
+			continue
+		}
+
+		var state T
+		err := st.Data.Decode(&state)
+		if err != nil {
+			return fmt.Errorf("failed to decode the state of a token: %w", err)
+		}
+
+		// Store the hashed state before deleting the old one, so an interrupted run loses no token
+		expiresAt := fn(st.ActorID, &state)
+		ttl := time.Until(expiresAt)
+		if ttl > 0 {
+			err = store.SetState(ctx, actorType, hashToken(st.ActorID), state, &actor.SetStateOpts{TTL: ttl})
+			if err != nil {
+				return fmt.Errorf("failed to store the hashed state of a token: %w", err)
+			}
+		}
+		err = store.DeleteState(ctx, actorType, st.ActorID)
+		if err != nil && !errors.Is(err, actor.ErrStateNotFound) {
+			return fmt.Errorf("failed to delete the state of a token: %w", err)
+		}
+		moved++
+	}
+
+	if moved > 0 {
+		slog.Info("Hashed tokens in the actor state", slog.String("actorType", actorType), slog.Int("count", moved))
+	}
+	return nil
+}
+
+// hashToken returns the hex-encoded SHA-256 hash v3 uses as the actor ID of a token
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func isTokenHash(actorID string) bool {
+	_, err := hex.DecodeString(actorID)
+	return err == nil && len(actorID) == 2*sha256.Size
 }
 
 // loadLegacyKV returns the JSON value of a kv row, or the zero value if the row is missing or empty
