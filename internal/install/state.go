@@ -30,14 +30,14 @@ type StateStore interface {
 	DeleteState(ctx context.Context, actorType string, actorID string) error
 }
 
-// WithStateStore calls fn with access to the actor state, which lives in Pocket ID's database unless a standalone Francis runtime is configured
+// WithStateStore calls fn with access to the actor state, which lives in Pocket ID's database, or its own file on SQLite, unless a standalone Francis runtime is configured
 func (i *Installation) WithStateStore(ctx context.Context, fn func(store StateStore) error) error {
 	if len(i.Config.FrancisAddresses) > 0 {
 		return withRemoteStateStore(ctx, i.Config, fn)
 	}
 
-	// Only the provider's Init creates and upgrades the Francis tables, which a database from before v2.10 doesn't have at all
-	provider, providerOpt, err := newActorProvider(i.DB, i.Pool)
+	// Only the provider's Init creates and upgrades the Francis tables, which a database from before v2.10 doesn't have at all, and neither does a new SQLite file with nothing moved into it
+	provider, providerOpt, err := newActorProvider(i.ActorDB, i.Pool)
 	if err != nil {
 		return fmt.Errorf("failed to create actor provider: %w", err)
 	}

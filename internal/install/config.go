@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -80,12 +81,18 @@ func LoadConfig() (*Config, error) {
 		return nil, errors.New("ENCRYPTION_KEY must be at least 16 bytes long")
 	}
 
-	// Pocket ID uses SQLite unless the connection string is a Postgres URL
+	// Pocket ID uses SQLite unless the connection string is a Postgres URL, and then the value names the folder of its database files
 	switch {
 	case cfg.DBConnectionString == "":
-		cfg.DBConnectionString = "data/pocket-id.db"
+		cfg.DBConnectionString = "data"
 	case strings.HasPrefix(cfg.DBConnectionString, "postgres://") || strings.HasPrefix(cfg.DBConnectionString, "postgresql://"):
 		cfg.Postgres = true
+	}
+	if !cfg.Postgres {
+		err = checkSqliteFolder(cfg.DBConnectionString)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// The upload path only has a default for the filesystem backend, since S3 uses it as an optional key prefix
@@ -114,4 +121,30 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// SqliteConnString returns the connection string of one SQLite database file in the folder DB_CONNECTION_STRING names, with the query parameters set there
+func (c *Config) SqliteConnString(file string) string {
+	dir, query, _ := strings.Cut(strings.TrimPrefix(c.DBConnectionString, "file:"), "?")
+	connString := "file:" + filepath.Join(dir, file)
+	if query != "" {
+		connString += "?" + query
+	}
+	return connString
+}
+
+// checkSqliteFolder rejects a connection string that names a database file, which is what Pocket ID before v3 expected, with the same message as Pocket ID
+// A path that doesn't exist yet but looks like a file is rejected too, since it would otherwise become a folder of that name
+func checkSqliteFolder(connString string) error {
+	dir, _, _ := strings.Cut(strings.TrimPrefix(connString, "file:"), "?")
+	info, err := os.Stat(dir)
+	isFile := err == nil && info.Mode().IsRegular()
+	switch strings.ToLower(filepath.Ext(dir)) {
+	case ".db", ".sqlite", ".sqlite3":
+		isFile = true
+	}
+	if isFile {
+		return fmt.Errorf("DB_CONNECTION_STRING must be the folder of the SQLite databases instead of a database file: set it to '%s' and make sure the database file in it is named pocket-id.db", filepath.Dir(dir))
+	}
+	return nil
 }

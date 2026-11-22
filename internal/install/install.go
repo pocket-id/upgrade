@@ -20,6 +20,8 @@ import (
 type Installation struct {
 	Config *Config
 	DB     *sql.DB
+	// ActorDB is only set for SQLite, where the embedded Francis runtime keeps its tables in a file of its own
+	ActorDB *sql.DB
 	// Pool is only set for Postgres, where DB wraps it
 	Pool *pgxpool.Pool
 }
@@ -27,14 +29,16 @@ type Installation struct {
 // Open connects to the database of the installation
 func Open(ctx context.Context, cfg *Config) (*Installation, error) {
 	if !cfg.Postgres {
-		connector, err := sqlitekit.NewConnector(sqlitekit.ConnectOpts{
-			ConnString: addSqliteDatetimeParams(cfg.DBConnectionString),
-			Logger:     slog.Default(),
-		})
+		db, err := openSqlite(cfg.SqliteConnString("pocket-id.db"))
 		if err != nil {
 			return nil, err
 		}
-		return &Installation{Config: cfg, DB: connector.OpenDB()}, nil
+		actorDB, err := openSqlite(cfg.SqliteConnString("francis.db"))
+		if err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+		return &Installation{Config: cfg, DB: db, ActorDB: actorDB}, nil
 	}
 
 	pool, err := pgxpool.New(ctx, cfg.DBConnectionString)
@@ -46,6 +50,9 @@ func Open(ctx context.Context, cfg *Config) (*Installation, error) {
 
 func (i *Installation) Close() {
 	_ = i.DB.Close()
+	if i.ActorDB != nil {
+		_ = i.ActorDB.Close()
+	}
 	if i.Pool != nil {
 		i.Pool.Close()
 	}
@@ -80,6 +87,17 @@ func (i *Installation) OpenFileStorage(ctx context.Context) (storage.FileStorage
 	default:
 		return storage.NewFilesystemStorage(cfg.UploadPath)
 	}
+}
+
+func openSqlite(connString string) (*sql.DB, error) {
+	connector, err := sqlitekit.NewConnector(sqlitekit.ConnectOpts{
+		ConnString: addSqliteDatetimeParams(connString),
+		Logger:     slog.Default(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return connector.OpenDB(), nil
 }
 
 // addSqliteDatetimeParams adds the datetime parameters Pocket ID sets on its SQLite connection, leaving any the user set explicitly alone

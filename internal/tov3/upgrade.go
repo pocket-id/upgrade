@@ -55,6 +55,12 @@ func Upgrade(ctx context.Context, inst *install.Installation) error {
 		return err
 	}
 
+	// Move the actor data into its own SQLite file first, so the next step reads and writes it where v3 expects it
+	err = moveActorData(ctx, inst)
+	if err != nil {
+		return err
+	}
+
 	// Move the app config and the signup tokens into the actor state
 	err = inst.WithStateStore(ctx, func(store install.StateStore) error {
 		return upgradeActorState(ctx, db, store, inst.Config.EncryptionKey)

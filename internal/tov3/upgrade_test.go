@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -51,7 +50,7 @@ func newTestDatabase(t *testing.T, postgres bool) *install.Installation {
 
 	cfg := &install.Config{
 		EncryptionKey:      []byte("0123456789abcdef0123456789abcdef"),
-		DBConnectionString: filepath.Join(t.TempDir(), "pocket-id.db"),
+		DBConnectionString: t.TempDir(),
 		Postgres:           postgres,
 		FileBackend:        "filesystem",
 		UploadPath:         t.TempDir(),
@@ -137,6 +136,17 @@ func readSchema(t *testing.T, db *sql.DB, postgres bool) []string {
 	require.NoError(t, rows.Err())
 	require.NotEmpty(t, schema)
 	return schema
+}
+
+// withLegacyStateStore calls fn with access to the actor state where v2 kept it, which on SQLite is the main database file
+func withLegacyStateStore(t *testing.T, inst *install.Installation, fn func(store install.StateStore) error) error {
+	t.Helper()
+
+	legacy := *inst
+	if !inst.Config.Postgres {
+		legacy.ActorDB = inst.DB
+	}
+	return legacy.WithStateStore(t.Context(), fn)
 }
 
 func readState(t *testing.T, inst *install.Installation, actorType string, actorID string, dest any) error {
@@ -349,7 +359,10 @@ func TestUpgradeActorStateFromState(t *testing.T) {
 		require.NoError(t, provider.Close())
 
 		var before map[string]string
-		require.NoError(t, readState(t, inst, appConfigActorType, actor.SingletonActorID, &before))
+		err = withLegacyStateStore(t, inst, func(store install.StateStore) error {
+			return store.GetState(t.Context(), appConfigActorType, actor.SingletonActorID, &before)
+		})
+		require.NoError(t, err)
 		require.Equal(t, "true", before["EmailVerificationEnabled"])
 		require.Equal(t, "false", before["EmailLoginNotificationEnabled"])
 		require.NotEmpty(t, before["SmtpPassword"])
@@ -363,6 +376,14 @@ func TestUpgradeActorStateFromState(t *testing.T) {
 		var after map[string]string
 		require.NoError(t, readState(t, inst, appConfigActorType, actor.SingletonActorID, &after))
 		assert.Equal(t, before["SmtpPassword"], decryptSecret(t, inst.Config.EncryptionKey, after["SmtpPassword"]))
+
+		// On SQLite the actor data moved into its own file, leaving nothing of Francis in the main one
+		if !postgres {
+			var francisObjects int
+			require.NoError(t, db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'francis\_%' ESCAPE '\'`).Scan(&francisObjects))
+			assert.Zero(t, francisObjects)
+			require.NoError(t, moveActorData(t.Context(), inst))
+		}
 
 		// Everything but the switches and the secret must be carried over unchanged
 		expected := before
@@ -390,7 +411,7 @@ func TestUpgradeActorStateHashesTokens(t *testing.T) {
 
 		// Store the tokens the way v2 did, keyed by the token itself and with the device token in clear text
 		expiresAt := time.Now().Add(time.Hour).Truncate(time.Second)
-		err := inst.WithStateStore(t.Context(), func(store install.StateStore) error {
+		err := withLegacyStateStore(t, inst, func(store install.StateStore) error {
 			err := store.SetState(t.Context(), signupTokenActorType, "SIGNUPTOKEN12345", signupTokenState{ID: "signup-id", UsageLimit: 3, UsageCount: 1, ExpiresAt: expiresAt}, &actor.SetStateOpts{TTL: time.Hour})
 			if err != nil {
 				return err

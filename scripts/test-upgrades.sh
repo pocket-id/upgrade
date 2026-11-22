@@ -58,11 +58,13 @@ api() {
 }
 
 # Runs a query against the database of the current case and prints the result
+# On SQLite the second argument names the database file, which is pocket-id.db unless it's the actor data in francis.db
+# The file isn't opened read-only, since a cleanly closed WAL database has no shared-memory file, and only a writable connection can create it
 sql() {
 	if [ "$db" = postgres ]; then
 		docker exec pocket-id-upgrade-pg psql -U postgres -d "$dbname" -Atc "$1"
 	else
-		sqlite3 "file:$data/pocket-id.db?mode=ro" "$1"
+		sqlite3 "$data/${2:-pocket-id.db}" "$1"
 	fi
 }
 
@@ -79,7 +81,7 @@ smtp_password_encrypted() {
 	if [ "$db" = postgres ]; then
 		[ "$(sql "SELECT COUNT(*) FROM francis_actor_state WHERE actor_type = 'AppConfig' AND position('encrypted:'::bytea IN actor_state_data) > 0 AND position('smtp-plain-secret'::bytea IN actor_state_data) = 0")" = 1 ]
 	else
-		[ "$(sql "SELECT COUNT(*) FROM francis_actor_state WHERE actor_type = 'AppConfig' AND instr(actor_state_data, CAST('encrypted:' AS BLOB)) > 0 AND instr(actor_state_data, CAST('smtp-plain-secret' AS BLOB)) = 0")" = 1 ]
+		[ "$(sql "SELECT COUNT(*) FROM francis_actor_state WHERE actor_type = 'AppConfig' AND instr(actor_state_data, CAST('encrypted:' AS BLOB)) > 0 AND instr(actor_state_data, CAST('smtp-plain-secret' AS BLOB)) = 0" francis.db)" = 1 ]
 	fi
 }
 
@@ -207,6 +209,9 @@ for i in "${!cases[@]}"; do
 	check "golang-migrate table removed" eval '! table_exists schema_migrations'
 	check "goose table created" table_exists goose_db_version
 	check "SMTP password encrypted" smtp_password_encrypted
+	if [ "$db" = sqlite ]; then
+		check "actor data moved out of pocket-id.db" eval '! table_exists francis_actor_state'
+	fi
 	if [ "$failures" -gt "$before" ]; then
 		docker logs pocket-id-upgrade-new 2>&1 | grep -E ' (ERR|WRN) ' | grep -v 'networked file system\|MAXMIND' | tail -n 20 | sed 's/^/        /'
 	fi
