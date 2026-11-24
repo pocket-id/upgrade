@@ -261,6 +261,45 @@ func TestMigrationKeepsAdminAsActorOfPasskeyRemoval(t *testing.T) {
 	})
 }
 
+func TestUpgradeLeavesSharedEmailWithOneAccount(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, postgres bool) {
+		// Start from the last schema that compares the letter case of an email
+		inst := newDatabaseAt(t, postgres, 20261114125700)
+		db := inst.DB
+		for _, user := range []struct {
+			id, username, email string
+			verified            bool
+		}{
+			{"9a1c1e0e-0b7c-4b7e-9d0f-2f1c8f0a1b01", "unverified", "Kim@example.com", false},
+			{"9a1c1e0e-0b7c-4b7e-9d0f-2f1c8f0a1b02", "verified", "kim@EXAMPLE.com", true},
+			{"9a1c1e0e-0b7c-4b7e-9d0f-2f1c8f0a1b03", "older", "Lee@example.com", false},
+			{"9a1c1e0e-0b7c-4b7e-9d0f-2f1c8f0a1b04", "newer", "lee@example.com", false},
+		} {
+			_, err := db.ExecContext(t.Context(), `INSERT INTO users (id, username, email, email_verified, first_name, last_name, display_name) VALUES ($1, $2, $3, $4, '', '', '')`, user.id, user.username, user.email, user.verified)
+			require.NoError(t, err)
+		}
+
+		require.NoError(t, Upgrade(t.Context(), inst))
+
+		// The verified account keeps the address, and without one the first account does
+		rows, err := db.QueryContext(t.Context(), `SELECT username FROM users WHERE email IS NOT NULL ORDER BY username`)
+		require.NoError(t, err)
+		defer rows.Close()
+		var holders []string
+		for rows.Next() {
+			var holder string
+			require.NoError(t, rows.Scan(&holder))
+			holders = append(holders, holder)
+		}
+		require.NoError(t, rows.Err())
+		assert.Equal(t, []string{"older", "verified"}, holders)
+
+		// Another spelling of a held address is refused from now on
+		_, err = db.ExecContext(t.Context(), `UPDATE users SET email = 'LEE@example.com' WHERE username = 'newer'`)
+		require.Error(t, err)
+	})
+}
+
 func TestUpgradeStorage(t *testing.T) {
 	legacyLogo, err := os.ReadFile("testdata/logoLight.svg")
 	require.NoError(t, err)

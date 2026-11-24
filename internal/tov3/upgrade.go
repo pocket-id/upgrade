@@ -3,6 +3,7 @@ package tov3
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 
@@ -40,6 +41,10 @@ func Upgrade(ctx context.Context, inst *install.Installation) error {
 
 	// Bring the schema to the last version before v3, which is what every later step and v3's first migration build on
 	slog.Info("Upgrading to Pocket ID v3")
+	err = warnAboutSharedEmails(ctx, db, postgres)
+	if err != nil {
+		return err
+	}
 	err = migrateLegacy(ctx, db, postgres)
 	if err != nil {
 		return err
@@ -75,5 +80,38 @@ func Upgrade(ctx context.Context, inst *install.Installation) error {
 		return fmt.Errorf("failed to hand the database over to goose: %w", err)
 	}
 	slog.Info("Upgraded to Pocket ID v3")
+	return nil
+}
+
+// warnAboutSharedEmails names the accounts that hold one email address in different letter case, since v3 compares addresses without it and the migrations take the address from all but one of them
+func warnAboutSharedEmails(ctx context.Context, db *sql.DB, postgres bool) error {
+	// SQLite folds ASCII letters only, which Postgres does under the C collation
+	folded := "lower(email)"
+	if postgres {
+		folded = `lower(email COLLATE "C")`
+	}
+	rows, err := db.QueryContext(ctx, `SELECT username FROM users WHERE `+folded+` IN (SELECT `+folded+` FROM users GROUP BY 1 HAVING count(*) > 1) ORDER BY username`)
+	if err != nil {
+		return fmt.Errorf("failed to look for accounts that share an email address: %w", err)
+	}
+	defer rows.Close()
+
+	var usernames []string
+	for rows.Next() {
+		var username string
+		err = rows.Scan(&username)
+		if err != nil {
+			return fmt.Errorf("failed to read an account that shares an email address: %w", err)
+		}
+		usernames = append(usernames, username)
+	}
+	err = rows.Err()
+	if err != nil {
+		return fmt.Errorf("failed to read the accounts that share an email address: %w", err)
+	}
+
+	if len(usernames) > 0 {
+		slog.Warn("Some accounts share an email address apart from its letter case, which Pocket ID v3 no longer allows: the address stays with the verified account, or else with the oldest, and the others are left without an email", "usernames", usernames)
+	}
 	return nil
 }
