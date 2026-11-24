@@ -54,14 +54,15 @@ func init() {
 	})
 }
 
-// migrateLegacy applies the golang-migrate migrations the database doesn't have yet
-func migrateLegacy(ctx context.Context, db *sql.DB, postgres bool) error {
+// newLegacyMigrator returns golang-migrate over the migrations of the earlier versions, and a function that releases the connection it holds
+func newLegacyMigrator(ctx context.Context, db *sql.DB, postgres bool) (*migrate.Migrate, func(), error) {
 	// Create the driver the way Pocket ID did, so the migrations run under the same conditions as in the versions that shipped them
 	var (
 		driver  database.Driver
 		dialect string
 		err     error
 	)
+	release := func() {}
 	if postgres {
 		dialect = "postgres"
 
@@ -69,26 +70,39 @@ func migrateLegacy(ctx context.Context, db *sql.DB, postgres bool) error {
 		var conn *sql.Conn
 		conn, err = db.Conn(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to acquire migration connection: %w", err)
+			return nil, nil, fmt.Errorf("failed to acquire migration connection: %w", err)
 		}
-		defer conn.Close()
+		release = func() { _ = conn.Close() }
 		driver, err = postgresMigrate.WithConnection(ctx, conn, &postgresMigrate.Config{})
 	} else {
 		dialect = "sqlite"
 		driver, err = sqliteMigrate.WithInstance(db, &sqliteMigrate.Config{NoTxWrap: true})
 	}
 	if err != nil {
-		return fmt.Errorf("failed to create migration driver: %w", err)
+		release()
+		return nil, nil, fmt.Errorf("failed to create migration driver: %w", err)
 	}
 
 	source, err := iofs.New(migrationsFS, "migrations/"+dialect)
 	if err != nil {
-		return fmt.Errorf("failed to create migration source: %w", err)
+		release()
+		return nil, nil, fmt.Errorf("failed to create migration source: %w", err)
 	}
 	m, err := migrate.NewWithInstance("iofs", source, "pocket-id", driver)
 	if err != nil {
-		return fmt.Errorf("failed to create migration instance: %w", err)
+		release()
+		return nil, nil, fmt.Errorf("failed to create migration instance: %w", err)
 	}
+	return m, release, nil
+}
+
+// migrateLegacy applies the golang-migrate migrations the database doesn't have yet
+func migrateLegacy(ctx context.Context, db *sql.DB, postgres bool) error {
+	m, release, err := newLegacyMigrator(ctx, db, postgres)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	err = m.Up()
 	switch {

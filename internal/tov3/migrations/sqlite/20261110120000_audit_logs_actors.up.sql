@@ -17,12 +17,19 @@ CREATE TABLE audit_logs_new
     actor_name TEXT
 );
 
--- Every earlier entry was an action users took on their own account
+-- Earlier entries were actions users took on their own account
 INSERT INTO audit_logs_new (id, created_at, event, ip_address, user_agent, data, user_id, country, city, actor_type, actor_id, actor_name)
 SELECT audit_logs.id, audit_logs.created_at, event, ip_address, user_agent, data, user_id, country, city,
        CASE WHEN users.id IS NOT NULL THEN 'user' END, users.id, users.username
 FROM audit_logs
          LEFT JOIN users ON users.id = audit_logs.user_id;
+
+-- The exception is an admin removing another user's passkey, who was recorded in the data of the entry
+UPDATE audit_logs_new
+SET actor_type = 'user',
+    actor_id   = json_extract(data, '$.actorUserID'),
+    actor_name = json_extract(data, '$.actorUsername')
+WHERE json_extract(data, '$.actorUserID') IS NOT NULL;
 
 DROP TABLE audit_logs;
 ALTER TABLE audit_logs_new RENAME TO audit_logs;

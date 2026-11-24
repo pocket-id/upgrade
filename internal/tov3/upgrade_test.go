@@ -88,6 +88,18 @@ func newLegacyDatabase(t *testing.T, postgres bool) *install.Installation {
 	return inst
 }
 
+// newDatabaseAt creates a database in the state the given migration of an earlier version left it in
+func newDatabaseAt(t *testing.T, postgres bool, version uint) *install.Installation {
+	t.Helper()
+
+	inst := newTestDatabase(t, postgres)
+	m, release, err := newLegacyMigrator(t.Context(), inst.DB, postgres)
+	require.NoError(t, err)
+	defer release()
+	require.NoError(t, m.Migrate(version))
+	return inst
+}
+
 func newBaselineProvider(t *testing.T, db *sql.DB, postgres bool) *goose.Provider {
 	t.Helper()
 
@@ -209,6 +221,43 @@ func TestUpgradeHandsOverToGoose(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, legacy)
 		assert.Equal(t, readSchema(t, db, postgres), readSchema(t, fresh, postgres))
+	})
+}
+
+func TestMigrationKeepsAdminAsActorOfPasskeyRemoval(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, postgres bool) {
+		// Start from the last schema without the actor columns
+		db := newDatabaseAt(t, postgres, 20261108120000).DB
+		const (
+			ownerID = "9a1c1e0e-0b7c-4b7e-9d0f-2f1c8f0a1b01"
+			adminID = "9a1c1e0e-0b7c-4b7e-9d0f-2f1c8f0a1b02"
+		)
+		for id, username := range map[string]string{ownerID: "owner", adminID: "admin"} {
+			_, err := db.ExecContext(t.Context(), `INSERT INTO users (id, username, first_name, last_name, display_name) VALUES ($1, $2, '', '', '')`, id, username)
+			require.NoError(t, err)
+		}
+		for id, data := range map[string]string{
+			"9a1c1e0e-0b7c-4b7e-9d0f-2f1c8f0a1b03": `{"actorUserID":"` + adminID + `","actorUsername":"admin"}`,
+			"9a1c1e0e-0b7c-4b7e-9d0f-2f1c8f0a1b04": `{}`,
+		} {
+			_, err := db.ExecContext(t.Context(), `INSERT INTO audit_logs (id, created_at, event, user_agent, data, user_id) VALUES ($1, CURRENT_TIMESTAMP, 'PASSKEY_REMOVED', '', $2, $3)`, id, []byte(data), ownerID)
+			require.NoError(t, err)
+		}
+
+		require.NoError(t, migrateLegacy(t.Context(), db, postgres))
+
+		// The admin stays the actor of the removal on the owner's account, and the owner the actor of their own
+		rows, err := db.QueryContext(t.Context(), `SELECT actor_name FROM audit_logs ORDER BY id`)
+		require.NoError(t, err)
+		defer rows.Close()
+		var actors []string
+		for rows.Next() {
+			var actor string
+			require.NoError(t, rows.Scan(&actor))
+			actors = append(actors, actor)
+		}
+		require.NoError(t, rows.Err())
+		assert.Equal(t, []string{"admin", "owner"}, actors)
 	})
 }
 
