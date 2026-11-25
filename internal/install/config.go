@@ -27,6 +27,9 @@ type Config struct {
 	S3ForcePathStyle                bool   `env:"S3_FORCE_PATH_STYLE"`
 	S3DisableDefaultIntegrityChecks bool   `env:"S3_DISABLE_DEFAULT_INTEGRITY_CHECKS"`
 
+	CachePath     string `env:"CACHE_PATH"`
+	GeoLiteDBPath string `env:"GEOLITE_DB_PATH"`
+
 	FrancisHost        string `env:"EXPERIMENTAL_FRANCIS_HOST"`
 	FrancisHostPSK     []byte `env:"EXPERIMENTAL_FRANCIS_HOST_PSK"`
 	FrancisHostJWTFile string `env:"EXPERIMENTAL_FRANCIS_HOST_JWT_FILE"`
@@ -106,6 +109,11 @@ func LoadConfig() (*Config, error) {
 		}
 	default:
 		return nil, errors.New("invalid FILE_BACKEND value. Must be 'filesystem', 'database', or 's3'")
+	}
+
+	// v3 keeps the files it can download or render again in this folder
+	if cfg.CachePath == "" {
+		cfg.CachePath = "cache"
 	}
 
 	// Any value other than "embedded" lists the addresses of a standalone Francis runtime

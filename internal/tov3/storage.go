@@ -22,6 +22,7 @@ const (
 	legacyInitedPath            = applicationAssetsPath + "/.inited"
 	deletedBackgroundPath       = applicationAssetsPath + "/.deleted/background"
 	oidcClientImagesPath        = "oidc-client-images"
+	defaultProfilePicturesPath  = "profile-pictures/defaults"
 )
 
 // The default images earlier versions copied into the storage, by file name
@@ -49,6 +50,12 @@ func upgradeStorage(ctx context.Context, db *sql.DB, files storage.FileStorage) 
 	err = moveOidcClientImages(ctx, db, files)
 	if err != nil {
 		return fmt.Errorf("failed to move OIDC client logos: %w", err)
+	}
+
+	// v3 keeps the generated default profile pictures in its cache folder, and renders the ones it needs again
+	err = files.DeleteAll(ctx, defaultProfilePicturesPath)
+	if err != nil {
+		return fmt.Errorf("failed to delete the default profile pictures: %w", err)
 	}
 	return nil
 }

@@ -60,6 +60,12 @@ func Upgrade(ctx context.Context, inst *install.Installation) error {
 		return err
 	}
 
+	// Move the GeoLite database to the cache folder, which is not worth failing the upgrade over because Pocket ID runs without it
+	err = moveGeoLiteDB(inst.Config)
+	if err != nil {
+		slog.Warn("Failed to move the GeoLite database to the cache folder, move it there by hand or let Pocket ID download it again", slog.String("from", legacyGeoLiteDBPath), slog.String("cacheFolder", inst.Config.CachePath), slog.Any("error", err))
+	}
+
 	// Move the actor data into its own SQLite file first, so the next step reads and writes it where v3 expects it
 	err = moveActorData(ctx, inst)
 	if err != nil {

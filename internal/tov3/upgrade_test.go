@@ -322,6 +322,8 @@ func TestUpgradeStorage(t *testing.T) {
 					"oidc-client-images/client.png":                                "light",
 					"oidc-client-images/client-dark.svg":                           "dark",
 					"oidc-client-images/cimd-" + sha256Hex(cimdClientID) + ".webp": "cimd",
+					"profile-pictures/defaults/AL.png":                             "default picture",
+					"profile-pictures/user.png":                                    "uploaded picture",
 				} {
 					require.NoError(t, files.Save(t.Context(), path, strings.NewReader(content)))
 				}
@@ -337,7 +339,7 @@ func TestUpgradeStorage(t *testing.T) {
 
 				listFiles := func() []string {
 					var all []string
-					for _, root := range []string{legacyApplicationAssetsPath, applicationAssetsPath, oidcClientImagesPath} {
+					for _, root := range []string{legacyApplicationAssetsPath, applicationAssetsPath, oidcClientImagesPath, "profile-pictures"} {
 						paths, err := files.List(t.Context(), root)
 						require.NoError(t, err)
 						all = append(all, paths...)
@@ -351,6 +353,7 @@ func TestUpgradeStorage(t *testing.T) {
 					"oidc-client-images/" + sha256Hex(cimdClientID) + ".webp",
 					"oidc-client-images/" + sha256Hex("client") + "-dark.svg",
 					"oidc-client-images/" + sha256Hex("client") + ".png",
+					"profile-pictures/user.png",
 				}
 				slices.Sort(expected)
 
@@ -534,4 +537,26 @@ func TestUpgradeActorStateHashesTokens(t *testing.T) {
 		require.NoError(t, readState(t, inst, oneTimeAccessTokenActorType, hashToken("abc123"), &rerun))
 		assert.Equal(t, loginCode, rerun)
 	})
+}
+
+func TestMoveGeoLiteDB(t *testing.T) {
+	t.Chdir(t.TempDir())
+	require.NoError(t, os.Mkdir("data", 0700))
+	require.NoError(t, os.WriteFile(legacyGeoLiteDBPath, []byte("geolite"), 0600))
+
+	// A path that was set explicitly keeps the database where it is
+	require.NoError(t, moveGeoLiteDB(&install.Config{CachePath: "cache", GeoLiteDBPath: legacyGeoLiteDBPath}))
+	require.FileExists(t, legacyGeoLiteDBPath)
+
+	require.NoError(t, moveGeoLiteDB(&install.Config{CachePath: "cache"}))
+	content, err := os.ReadFile("cache/GeoLite2-City.mmdb")
+	require.NoError(t, err)
+	assert.Equal(t, "geolite", string(content))
+	require.NoFileExists(t, legacyGeoLiteDBPath)
+
+	// Only the database is left in the cache folder, and a repeated run finds nothing to move
+	entries, err := os.ReadDir("cache")
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
+	require.NoError(t, moveGeoLiteDB(&install.Config{CachePath: "cache"}))
 }
