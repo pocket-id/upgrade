@@ -20,9 +20,10 @@ const (
 	applicationAssetsPath       = "application-assets"
 	legacyApplicationAssetsPath = "application-images"
 	legacyInitedPath            = applicationAssetsPath + "/.inited"
-	deletedBackgroundPath       = applicationAssetsPath + "/.deleted/background"
-	oidcClientImagesPath        = "oidc-client-images"
-	defaultProfilePicturesPath  = "profile-pictures/defaults"
+	// assetKeyPrefix prefixes the kv rows in which v3 records the file of each application asset, or an empty value for one an administrator deleted
+	assetKeyPrefix             = "application_asset_"
+	oidcClientImagesPath       = "oidc-client-images"
+	defaultProfilePicturesPath = "profile-pictures/defaults"
 )
 
 // The default images earlier versions copied into the storage, by file name
@@ -43,9 +44,13 @@ func upgradeStorage(ctx context.Context, db *sql.DB, files storage.FileStorage) 
 	if err != nil {
 		return fmt.Errorf("failed to move application assets: %w", err)
 	}
-	err = cleanApplicationAssets(ctx, files)
+	err = cleanApplicationAssets(ctx, db, files)
 	if err != nil {
 		return fmt.Errorf("failed to clean up application assets: %w", err)
+	}
+	err = recordApplicationAssets(ctx, db, files)
+	if err != nil {
+		return fmt.Errorf("failed to record application assets: %w", err)
 	}
 	err = moveOidcClientImages(ctx, db, files)
 	if err != nil {
@@ -81,7 +86,7 @@ func moveApplicationAssets(ctx context.Context, files storage.FileStorage) error
 }
 
 // cleanApplicationAssets removes the default images of earlier versions and replaces the marker that said they were copied
-func cleanApplicationAssets(ctx context.Context, files storage.FileStorage) error {
+func cleanApplicationAssets(ctx context.Context, db *sql.DB, files storage.FileStorage) error {
 	paths, err := files.List(ctx, applicationAssetsPath)
 	if err != nil {
 		return err
@@ -96,7 +101,6 @@ func cleanApplicationAssets(ctx context.Context, files storage.FileStorage) erro
 			inited = true
 			continue
 		case dir != applicationAssetsPath+"/":
-			// The markers of deleted images live in a subfolder
 			continue
 		case strings.TrimSuffix(name, path.Ext(name)) == "background":
 			hasBackground = true
@@ -117,17 +121,47 @@ func cleanApplicationAssets(ctx context.Context, files storage.FileStorage) erro
 	}
 
 	// Earlier versions wrote one marker once the default images were copied, so a missing background meant an administrator deleted it
-	// v3 tracks that per image, and would restore the background without its marker
+	// v3 tracks that per image, and would restore the background without an empty row
 	if !inited {
 		return nil
 	}
 	if !hasBackground {
-		err = files.Save(ctx, deletedBackgroundPath, strings.NewReader(""))
+		err = recordApplicationAsset(ctx, db, "background", "")
 		if err != nil {
-			return fmt.Errorf("failed to store the marker of the deleted background: %w", err)
+			return err
 		}
 	}
 	return files.Delete(ctx, legacyInitedPath)
+}
+
+// recordApplicationAssets records the application assets that are left in the kv rows v3 reads them from
+// v3 only copies its default images for assets without a row, and treats them as not set otherwise
+func recordApplicationAssets(ctx context.Context, db *sql.DB, files storage.FileStorage) error {
+	paths, err := files.List(ctx, applicationAssetsPath)
+	if err != nil {
+		return err
+	}
+
+	for _, p := range paths {
+		dir, fileName := path.Split(p)
+		if dir != applicationAssetsPath+"/" {
+			continue
+		}
+		err = recordApplicationAsset(ctx, db, strings.TrimSuffix(fileName, path.Ext(fileName)), fileName)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recordApplicationAsset keeps an existing row, so a repeated run leaves the result of an earlier one alone
+func recordApplicationAsset(ctx context.Context, db *sql.DB, name string, fileName string) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO kv ("key", value) VALUES ($1, $2) ON CONFLICT ("key") DO NOTHING`, assetKeyPrefix+name, fileName)
+	if err != nil {
+		return fmt.Errorf("failed to record the application asset '%s': %w", name, err)
+	}
+	return nil
 }
 
 // moveOidcClientImages moves client logos, which earlier versions stored under the raw client ID, to their hashed path

@@ -348,7 +348,6 @@ func TestUpgradeStorage(t *testing.T) {
 					return all
 				}
 				expected := []string{
-					"application-assets/.deleted/background",
 					"application-assets/logoDark.svg",
 					"oidc-client-images/" + sha256Hex(cimdClientID) + ".webp",
 					"oidc-client-images/" + sha256Hex("client") + "-dark.svg",
@@ -367,9 +366,30 @@ func TestUpgradeStorage(t *testing.T) {
 				require.NoError(t, reader.Close())
 				assert.Equal(t, "custom logo", string(content))
 
+				// The custom logo is recorded, the deleted background is recorded as empty, and the default logo of the earlier version is left for v3 to restore
+				listAssetRows := func() map[string]string {
+					rows, err := db.QueryContext(t.Context(), `SELECT "key", value FROM kv WHERE "key" LIKE 'application_asset_%'`)
+					require.NoError(t, err)
+					defer rows.Close()
+					assets := map[string]string{}
+					for rows.Next() {
+						var key, value string
+						require.NoError(t, rows.Scan(&key, &value))
+						assets[key] = value
+					}
+					require.NoError(t, rows.Err())
+					return assets
+				}
+				expectedRows := map[string]string{
+					"application_asset_background": "",
+					"application_asset_logoDark":   "logoDark.svg",
+				}
+				assert.Equal(t, expectedRows, listAssetRows())
+
 				// A run that repeats the step after an interruption must leave the result alone
 				require.NoError(t, upgradeStorage(t.Context(), db, files))
 				assert.Equal(t, expected, listFiles())
+				assert.Equal(t, expectedRows, listAssetRows())
 			})
 		}
 	})
