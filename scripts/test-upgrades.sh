@@ -89,8 +89,9 @@ config_has() {
 	curl -sf -H "X-API-KEY: $key" "$base/api/admin/application-configuration" | jq -e --arg k "$1" --arg v "$2" 'map(select(.key == $k and .value == $v)) | length == 1'
 }
 
+# v3 lists a signup token by its prefix only, since it stores a hash of the token
 signup_link_works() {
-	curl -sS --fail-with-body -H "X-API-KEY: $key" "$base/api/admin/signup-tokens" | jq -e --arg t "$token" '(.data // .) | map(select(.token == $t)) | length == 1' &&
+	curl -sS --fail-with-body -H "X-API-KEY: $key" "$base/api/admin/signup-tokens" | jq -e --arg t "$token" '(.data // .) | map(select(.prefix as $p | $p != "" and ($t | startswith($p)))) | length == 1' &&
 		curl -sS --fail-with-body -X POST -H 'Content-Type: application/json' -d "{\"token\":\"$token\",\"username\":\"bob\",\"email\":\"bob@example.com\",\"firstName\":\"Bob\",\"lastName\":\"Doe\",\"displayName\":\"Bob Doe\"}" "$base/api/signup"
 }
 
